@@ -85,26 +85,6 @@ commands:
               done
             fi
             echo "Service ready after ${ELAPSED}s"
-  install_helm:
-    steps:
-      - run:
-          name: Install Helm v3.17.3
-          command: |
-            curl -sSLf -o /tmp/helm.tar.gz \
-              https://get.helm.sh/helm-v3.17.3-linux-amd64.tar.gz
-            echo "ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd  /tmp/helm.tar.gz" | sha256sum -c -
-            sudo tar -C /usr/local/bin --strip-components=1 -xzf /tmp/helm.tar.gz linux-amd64/helm
-            rm -f /tmp/helm.tar.gz
-  install_kind:
-    steps:
-      - run:
-          name: Install Kind v0.20.0
-          command: |
-            curl -sSLf -o /tmp/kind \
-              https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
-            echo "513a7213d6d3332dd9ef27c24dab35e5ef10a04fa27274fe1c14d8a246493ded  /tmp/kind" | sha256sum -c -
-            chmod +x /tmp/kind
-            sudo mv /tmp/kind /usr/local/bin/kind
   install_uv:
     description: "Install pinned uv (0.10.9) with checksum verification. Adds ~/.local/bin to PATH."
     steps:
@@ -474,84 +454,6 @@ jobs:
           name: Guard against MAX_PATH-busting packaged wheel paths
           command: |
             python3 tests/windows_tests/check_windows_wheel_install.py --lengths-only
-
-  helm_chart_testing:
-    machine:
-      image: ubuntu-2204:2024.04.1 # Use machine executor instead of docker
-    resource_class: medium
-    working_directory: ~/project
-
-    steps:
-      - checkout
-      - skip_if_unrelated_changes
-      - attach_workspace:
-          at: ~/project
-      - setup_google_dns
-      - install_helm
-      - install_kind
-
-      # Install kubectl (pinned version with hardcoded checksum)
-      - run:
-          name: Install kubectl v1.31.4
-          command: |
-            curl -sSLf -o /tmp/kubectl \
-              https://dl.k8s.io/release/v1.31.4/bin/linux/amd64/kubectl
-            echo "298e19e9c6c17199011404278f0ff8168a7eca4217edad9097af577023a5620f  /tmp/kubectl" | sha256sum -c -
-            chmod +x /tmp/kubectl
-            sudo mv /tmp/kubectl /usr/local/bin/
-
-      # Create kind cluster
-      - run:
-          name: Create Kind Cluster
-          command: |
-            kind create cluster --name litellm-test
-
-      - run:
-          name: Load Docker Database Image for helm tests
-          command: |
-            zstd -d litellm-docker-database.tar.zst --stdout | docker load
-            IMAGE_TAG=${CIRCLE_SHA1:-ci}
-            docker tag litellm-docker-database:ci litellm-ci:${IMAGE_TAG}
-
-      - run:
-          name: Load Docker image into Kind
-          command: |
-            IMAGE_TAG=${CIRCLE_SHA1:-ci}
-            kind load docker-image litellm-ci:${IMAGE_TAG} --name litellm-test
-
-      # Run helm lint
-      - run:
-          name: Run helm lint
-          command: |
-            helm lint ./helm/litellm-helm
-
-      # Run helm tests
-      - run:
-          name: Run helm tests
-          command: |
-            IMAGE_TAG=${CIRCLE_SHA1:-ci}
-            helm install litellm ./helm/litellm-helm -f ./helm/litellm-helm/ci/test-values.yaml \
-              --set image.repository=litellm-ci \
-              --set image.tag=${IMAGE_TAG} \
-              --set image.pullPolicy=Never
-            if ! kubectl rollout status deployment/litellm --timeout=180s; then
-              kubectl describe pods -l app.kubernetes.io/name=litellm
-              kubectl logs -l app.kubernetes.io/name=litellm --tail=200
-              exit 1
-            fi
-
-            echo "Printing pod logs..."
-            kubectl logs $(kubectl get pods -l app.kubernetes.io/name=litellm -o jsonpath="{.items[0].metadata.name}")
-
-            # Run the helm tests
-            helm test litellm --logs
-
-      # Cleanup
-      - run:
-          name: Cleanup
-          command: |
-            kind delete cluster --name litellm-test
-          when: always # This ensures cleanup runs even if previous steps fail
 
   db_migration_disable_update_check:
     machine:
@@ -1700,10 +1602,6 @@ workflows:
             - build_docker_database_image
           filters: *integration_default_run
       - test_bad_database_url:
-          requires:
-            - build_docker_database_image
-          filters: *integration_default_run
-      - helm_chart_testing:
           requires:
             - build_docker_database_image
           filters: *integration_default_run

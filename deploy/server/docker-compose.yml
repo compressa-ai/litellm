@@ -1,0 +1,101 @@
+# On-prem LiteLLM. Public OpenAI port 4000, management only on host localhost:4001.
+# Postgres stays on the compose network so it does not take the host's 5432.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: llmproxy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-llmproxy}
+    volumes:
+      - litellm_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d litellm -U llmproxy"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  litellm-admin:
+    image: ${LITELLM_IMAGE:-docker.litellm.ai/berriai/litellm:main-stable}
+    entrypoint: ["/bin/sh", "/opt/compressa/entrypoint.sh"]
+    command:
+      - litellm
+      - --config
+      - /tmp/config.yaml
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4001"
+    environment:
+      DATABASE_URL: postgresql://llmproxy:${POSTGRES_PASSWORD:-llmproxy}@db:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}
+      STORE_MODEL_IN_DB: "True"
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    volumes:
+      - ./entrypoint.sh:/opt/compressa/entrypoint.sh:ro
+      - ./config.yaml:/opt/compressa/config.yaml:ro
+    ports:
+      - "127.0.0.1:4001:4001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4001/health/liveliness')"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  litellm-gateway:
+    image: ${LITELLM_IMAGE:-docker.litellm.ai/berriai/litellm:main-stable}
+    entrypoint: ["/bin/sh", "/opt/compressa/entrypoint.sh"]
+    command:
+      - python
+      - -m
+      - gateway.launch
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4000"
+      - --workers
+      - "1"
+    environment:
+      DATABASE_URL: postgresql://llmproxy:${POSTGRES_PASSWORD:-llmproxy}@db:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}
+      STORE_MODEL_IN_DB: "True"
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      PYTHONPATH: /app
+    volumes:
+      - ./entrypoint.sh:/opt/compressa/entrypoint.sh:ro
+      - ./config.yaml:/opt/compressa/config.yaml:ro
+      - ../../gateway:/app/gateway:ro
+    ports:
+      - "4000:4000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      litellm-admin:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness')"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  litellm_pg:
